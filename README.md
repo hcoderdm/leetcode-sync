@@ -2,7 +2,7 @@
 
 Syncs my accepted LeetCode submissions into a separate
 [leetcode-solutions](../leetcode-solutions) repo, with one commit per day I solved
-something, dated to that day, for example `20260101: 0001, 0015, 0146`. See
+something, dated to that day, for example `2026-01-01: 0001, 0015, 0146`. See
 [DESIGN.md](DESIGN.md) for how it works.
 
 ## Usage
@@ -34,6 +34,10 @@ For backfilled commits to show up on your GitHub contribution graph, your git
 
 Add notes to any problem's `solutions/<problem>/README.md` in the solutions repo. Sync never overwrites those files.
 
+The solutions README shows progress per difficulty and on each list in `lists/`
+(Blind 75, NeetCode 150 and Top Interview 150 are included). To track another list, add a `.txt` file
+there: a `# <name>` line followed by one LeetCode slug per line.
+
 ### Run daily (macOS)
 
 Save the following as `~/Library/LaunchAgents/com.leetcode-sync.plist`, adjusting the path:
@@ -62,5 +66,5 @@ launchctl load ~/Library/LaunchAgents/com.leetcode-sync.plist
 ### Tests
 
 ```bash
-python3 test_sync.py
+python3 -m unittest discover -s tests -t .
 ```

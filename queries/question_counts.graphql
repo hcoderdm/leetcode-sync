@@ -1,0 +1,7 @@
+# Number of problems on LeetCode, per difficulty plus "All". Public.
+query QuestionCounts {
+  allQuestionsCount {
+    difficulty
+    count
+  }
+}

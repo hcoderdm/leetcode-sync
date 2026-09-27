@@ -14,34 +14,20 @@ Target repo: --repo, else LEETCODE_SOLUTIONS_REPO, else ../leetcode-solutions
 """
 
 import argparse
-import http.client
 import json
 import os
-import re
-import socket
-import ssl
 import subprocess
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from errors import ApiError, AuthError, HttpError, MissingCredentialsError, NotAGitRepoError, SyncError, ToolRepoError
+from client import LeetCode
+from errors import MissingCredentialsError, NotAGitRepoError, SyncError, ToolRepoError
 
-GRAPHQL_HOST = "leetcode.com"
-GRAPHQL_PATH = "/graphql/"
-QUERY_DIR = Path(__file__).resolve().parent / "queries"
-QUERIES = {path.stem: path.read_text() for path in QUERY_DIR.glob("*.graphql")}
 STATE_FILE = ".sync_state.json"
 SOLUTIONS_DIR = "solutions"
 INDEX_START = "<!-- leetcode-sync:start -->"
 INDEX_END = "<!-- leetcode-sync:end -->"
-MIN_DELAY = 0.25  # seconds between requests; doubles on each 429, decays back on success
-MAX_DELAY = 8.0
-CONNECT_TIMEOUT = 3  # per address, so an unroutable IPv6 address fails fast
-READ_TIMEOUT = 30
-PAGE_SIZE = 20
-BATCH_SIZE = 20  # lookups aliased into one GraphQL request
 
 EXTENSIONS = {
     "python": "py", "python3": "py", "pythondata": "py", "cpp": "cpp", "c": "c",
@@ -52,6 +38,30 @@ EXTENSIONS = {
     "oraclesql": "sql", "postgresql": "sql",
 }
 DIFFICULTY_ORDER = ["Easy", "Medium", "Hard"]
+LISTS_DIR = Path(__file__).resolve().parent / "lists"  # one problem list per .txt file
+
+
+def load_lists():
+    """[(name, [slug, ...])] from lists/*.txt. A file's first line is "# <name>"."""
+    lists = []
+    for path in sorted(LISTS_DIR.glob("*.txt")):
+        lines = path.read_text().splitlines()
+        name = lines[0].lstrip("# ").strip() if lines else path.stem
+        slugs = [line.strip() for line in lines if line.strip() and not line.startswith("#")]
+        lists.append((name, slugs))
+    return lists
+
+
+def progress_bar(done, total, width=10):
+    """Text bar in 10% steps, e.g. `███░░░░░░░` for 30%."""
+    filled = min(width, round(done / total * width)) if total else 0
+    return "█" * filled + "░" * (width - filled)
+
+
+def progress_row(label, done, total):
+    if not total:
+        return f"| {label} | | {done} |"
+    return f"| {label} | `{progress_bar(done, total)}` {done / total:.0%} | {done} / {total:,} |"
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,163 +71,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--push", action="store_true", help="git push after committing")
     parser.add_argument("--test", action="store_true", help="list what would be synced")
     return parser.parse_args()
-
-
-"""
-Classes.
-"""
-
-class Connection(http.client.HTTPSConnection):
-    """Keep-alive HTTPS connection that tries IPv4 addresses first.
-
-    Some networks advertise IPv6 but can't route it. urllib would wait out the full
-    timeout on each IPv6 address, on every request, before falling back to IPv4.
-    """
-
-    def connect(self):
-        infos = socket.getaddrinfo(self.host, self.port, type=socket.SOCK_STREAM)
-        infos.sort(key=lambda info: info[0] != socket.AF_INET)
-        error = None
-        for family, type_, proto, _, address in infos:
-            sock = socket.socket(family, type_, proto)
-            sock.settimeout(CONNECT_TIMEOUT)
-            try:
-                sock.connect(address)
-            except OSError as e:
-                sock.close()
-                error = e
-                continue
-            sock.settimeout(self.timeout)
-            self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
-            return
-        raise error or OSError(f"Could not connect to {self.host}")
-
-
-def batch_query(template, count):
-    """Repeat a one-variable query `count` times under aliases r0, r1, ... in one request."""
-    source = "\n".join(line for line in template.splitlines() if not line.lstrip().startswith("#"))
-    header, _, body = source.partition("{")
-    body = body.rsplit("}", 1)[0].strip()
-    name, type_ = re.search(r"\$(\w+)\s*:\s*([\w!\[\]]+)", header).groups()
-    params = ", ".join(f"$v{i}: {type_}" for i in range(count))
-    fields = "\n".join(f"r{i}: " + re.sub(rf"\${name}\b", f"$v{i}", body) for i in range(count))
-    return f"query Batch({params}) {{\n{fields}\n}}"
-
-
-def retry_after(response):
-    try:
-        return min(float(response.getheader("Retry-After")), 60.0)
-    except (TypeError, ValueError):
-        return None
-
-
-class LeetCode:
-    """Minimal client for LeetCode's (undocumented) GraphQL API."""
-
-    def __init__(self, session, csrf_token):
-        self.headers = {
-            "Content-Type": "application/json",
-            "Origin": "https://leetcode.com",
-            "Referer": "https://leetcode.com/",
-            "Cookie": f"csrftoken={csrf_token}; LEETCODE_SESSION={session}",
-            "X-CSRFToken": csrf_token,
-            "User-Agent": "Mozilla/5.0 (leetcode-sync)",
-        }
-        # python.org's macOS build ships without CA certs, so the fallback is the system bundle.
-        ssl_context = ssl.create_default_context()
-        if not ssl_context.get_ca_certs() and Path("/etc/ssl/cert.pem").exists():
-            ssl_context.load_verify_locations("/etc/ssl/cert.pem")
-        self.conn = Connection(GRAPHQL_HOST, timeout=READ_TIMEOUT, context=ssl_context)
-        self.delay = MIN_DELAY
-        self._last_request = 0.0
-
-    def query(self, query, variables=None, retries=5):
-        body = json.dumps({"query": query, "variables": variables or {}})
-        for attempt in range(retries + 1):
-            wait = self.delay - (time.monotonic() - self._last_request)
-            if wait > 0:
-                time.sleep(wait)
-            self._last_request = time.monotonic()
-            try:
-                self.conn.request("POST", GRAPHQL_PATH, body, self.headers)
-                response = self.conn.getresponse()
-                raw = response.read()
-            except ssl.SSLCertVerificationError:
-                raise
-            except (OSError, http.client.HTTPException):
-                self.conn.close()  # stale keep-alive or a network blip, so reconnect
-                if attempt == retries:
-                    raise
-                time.sleep(2 ** attempt)
-                continue
-            if response.status == 429 or response.status >= 500:
-                if response.status == 429:
-                    self.delay = min(self.delay * 2, MAX_DELAY)
-                if attempt == retries:
-                    raise HttpError(status=response.status)
-                time.sleep(retry_after(response) or 2 ** attempt)
-                continue
-            if response.status != 200:
-                raise HttpError(status=response.status)
-            self.delay = max(MIN_DELAY, self.delay * 0.9)
-            payload = json.loads(raw)
-            if payload.get("data") is None:
-                raise ApiError(errors=payload.get("errors"))
-            return payload["data"]
-
-    def batched(self, name, values):
-        """Run one-variable query `name` for each value, BATCH_SIZE per request.
-
-        Returns {value: result}; a result is None if that lookup failed. If LeetCode
-        rejects a whole batch, falls back to one request per value.
-        """
-        results = {}
-        for start in range(0, len(values), BATCH_SIZE):
-            chunk = values[start:start + BATCH_SIZE]
-            try:
-                data = self.query(batch_query(QUERIES[name], len(chunk)),
-                                  {f"v{i}": value for i, value in enumerate(chunk)})
-                results.update({value: data.get(f"r{i}") for i, value in enumerate(chunk)})
-            except (ApiError, HttpError):
-                for value in chunk:
-                    try:
-                        data = self.query(batch_query(QUERIES[name], 1), {"v0": value})
-                        results[value] = data.get("r0")
-                    except (ApiError, HttpError):
-                        results[value] = None
-        return results
-
-    def username(self):
-        status = self.query(QUERIES["user_status"])["userStatus"]
-        if not status["isSignedIn"]:
-            raise AuthError()
-        return status["username"]
-
-    def accepted_submissions(self, since):
-        """Accepted submissions newer than `since` (unix seconds), newest first."""
-        found, offset = [], 0
-        while True:
-            page = self.query(QUERIES["submission_list"], {"offset": offset, "limit": PAGE_SIZE})["submissionList"]
-            for sub in page["submissions"]:
-                if int(sub["timestamp"]) <= since:
-                    return found
-                if sub["statusDisplay"] == "Accepted":
-                    found.append(sub)
-            if not page["hasNext"]:
-                return found
-            offset += PAGE_SIZE
-
-    def submission_codes(self, submission_ids):
-        """{submission id: code}. Raises if any submission's code can't be fetched."""
-        details = self.batched("submission_details", [int(i) for i in submission_ids])
-        missing = [i for i, d in details.items() if not d]
-        if missing:
-            raise ApiError(errors=f"no code returned for submission(s) {missing}")
-        return {str(i): d["code"] for i, d in details.items()}
-
-    def questions(self, slugs):
-        """{slug: metadata}; metadata is None when unavailable (e.g. Premium-locked problems)."""
-        return self.batched("question", list(slugs))
 
 
 """
@@ -288,8 +141,8 @@ def fmt_date(timestamp):
 
 
 def day_key(timestamp):
-    """Local calendar day, e.g. 20260101. Days are local so commits land on the right graph square."""
-    return local_time(timestamp).strftime("%Y%m%d")
+    """Local calendar day, e.g. 2026-01-01. Days are local so commits land on the right graph square."""
+    return fmt_date(timestamp)
 
 
 def problem_label(problem):
@@ -318,10 +171,24 @@ def render_index(state):
         key=lambda p: (not p["number"].isdigit(), int(p["number"]) if p["number"].isdigit() else 0, p["number"]),
     )
     counts = {d: sum(p["difficulty"] == d for p in problems) for d in DIFFICULTY_ORDER}
+    totals = state.get("totals", {})  # LeetCode's problem counts, refreshed each sync
     lines = [
         INDEX_START,
-        f"**{len(problems)} solved** · "
-        + " · ".join(f"{d}: {counts[d]}" for d in DIFFICULTY_ORDER),
+        "### Progress",
+        "",
+        "| Difficulty | Progress | Solved |",
+        "|---|---|---:|",
+        *(progress_row(d, counts[d], totals.get(d)) for d in DIFFICULTY_ORDER),
+        progress_row("**Total**", len(problems), totals.get("All")),
+    ]
+    lists = load_lists()
+    if lists:
+        lines += ["", "### Classic lists", "", "| List | Progress | Solved |", "|---|---|---:|"]
+        lines += [progress_row(name, sum(slug in state["problems"] for slug in slugs), len(slugs))
+                  for name, slugs in lists]
+    lines += [
+        "",
+        "### Solved problems",
         "",
         "| # | Problem | Difficulty | Topics | Solutions | Last solved |",
         "|---:|---|---|---|---|---|",
@@ -372,12 +239,17 @@ def sync(repo, client, push=False, test=False, log=print):
     new_slugs = sorted({sub["titleSlug"] for sub in subs} - state["problems"].keys())
     questions = client.questions(new_slugs) if new_slugs else {}
     codes = client.submission_codes([sub["id"] for sub in subs]) if subs and not test else {}
+    if subs and not test:
+        try:
+            state["totals"] = client.question_counts()
+        except SyncError as e:
+            log(f"Couldn't refresh LeetCode's problem counts, keeping the old ones: {e}")
 
     days = {}  # day key -> that day's submissions, oldest first
     for sub in subs:
         days.setdefault(day_key(sub["timestamp"]), []).append(sub)
 
-    # One commit per day: "20260101: 0001, 0015, 0146", holding that day's solutions,
+    # One commit per day: "2026-01-01: 0001, 0015, 0146", holding that day's solutions,
     # the regenerated index, and the state file.
     committed = 0
     for day, day_subs in days.items():

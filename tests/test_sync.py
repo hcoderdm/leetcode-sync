@@ -50,6 +50,9 @@ class FakeLeetCode:
     def questions(self, slugs):
         return {slug: QUESTIONS[slug] for slug in slugs}
 
+    def question_counts(self):
+        return {"All": 20, "Easy": 10, "Medium": 5, "Hard": 5}
+
 
 class SyncTest(unittest.TestCase):
     def setUp(self):
@@ -88,8 +91,8 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(sync.sync(self.repo, client, log=lambda *_: None), 2)
 
         # Day 2 only had an identical resubmission, so it gets no commit.
-        self.assertEqual(self.git_log(), [[str(DAY1 + 10_000), "20260101: 0001, 0146"],
-                                          [str(DAY3 + 50), "20260103: 0146"]])
+        self.assertEqual(self.git_log(), [[str(DAY1 + 10_000), "2026-01-01: 0001, 0146"],
+                                          [str(DAY3 + 50), "2026-01-03: 0146"]])
         folder = self.repo / "solutions" / "0001-two-sum"
         self.assertEqual((folder / "solution.py").read_text(), "class Solution: pass\n")
         self.assertTrue((folder / "solution.cpp").exists())
@@ -97,7 +100,10 @@ class SyncTest(unittest.TestCase):
         self.assertEqual((self.repo / "solutions/0146-lru-cache/solution.py").read_text(),
                          "class LRUCache: better\n")
         readme = (self.repo / "README.md").read_text()
-        self.assertIn("**2 solved** · Easy: 1 · Medium: 1 · Hard: 0", readme)
+        self.assertIn("| Easy | `█░░░░░░░░░` 10% | 1 / 10 |", readme)
+        self.assertIn("| Medium | `██░░░░░░░░` 20% | 1 / 5 |", readme)
+        self.assertIn("| Hard | `░░░░░░░░░░` 0% | 0 / 5 |", readme)
+        self.assertIn("| **Total** | `█░░░░░░░░░` 10% | 2 / 20 |", readme)
         self.assertLess(readme.index("| 1 |"), readme.index("| 146 |"))
         self.assertEqual(self.git_status(), "")
 
@@ -105,7 +111,7 @@ class SyncTest(unittest.TestCase):
         client.submissions.insert(0, sub(6, "two-sum", DAY3 + 500))
         client.code["6"] = "class Solution: better"
         self.assertEqual(sync.sync(self.repo, client, log=lambda *_: None), 1)
-        self.assertEqual(self.git_log()[1:], [[str(DAY3 + 500), "20260103: 0001, 0146"]])
+        self.assertEqual(self.git_log()[1:], [[str(DAY3 + 500), "2026-01-03: 0001, 0146"]])
 
         # Notes survive, and re-running with nothing new changes nothing.
         (folder / "README.md").write_text("my notes\n")
@@ -125,7 +131,22 @@ class SyncTest(unittest.TestCase):
         client.submissions.insert(0, sub(2, "lru-cache", DAY1 + 200))
         client.code["2"] = "b"
         sync.sync(self.repo, client, log=lambda *_: None)
-        self.assertEqual([m for _, m in self.git_log()], ["20260101: 0001", "20260101: 0146"])
+        self.assertEqual([m for _, m in self.git_log()], ["2026-01-01: 0001", "2026-01-01: 0146"])
+
+    def test_classic_lists_table(self):
+        lists = Path(self.tmp.name + "-lists")
+        lists.mkdir()
+        self.addCleanup(shutil.rmtree, lists)
+        (lists / "a.txt").write_text("# Tiny 3\n# comment\n\ntwo-sum\nlru-cache\nthree-sum\n")
+        (lists / "b.txt").write_text("# Other 1\nthree-sum\n")
+        client = FakeLeetCode([sub(1, "two-sum", DAY1), sub(2, "lru-cache", DAY1 + 1)],
+                              {"1": "a", "2": "b"})
+        with mock.patch.object(sync, "LISTS_DIR", lists):
+            sync.sync(self.repo, client, log=lambda *_: None)
+        readme = (self.repo / "README.md").read_text()
+        self.assertIn("| Tiny 3 | `███████░░░` 67% | 2 / 3 |", readme)
+        self.assertIn("| Other 1 | `░░░░░░░░░░` 0% | 0 / 1 |", readme)
+        self.assertLess(readme.index("Tiny 3"), readme.index("### Solved problems"))
 
     def test_index_preserves_surrounding_readme_text(self):
         (self.repo / "README.md").write_text(
@@ -138,58 +159,18 @@ class SyncTest(unittest.TestCase):
         self.assertNotIn("old", readme)
 
 
-class BatchQueryTest(unittest.TestCase):
-    def test_aliases_each_value_with_its_own_variable(self):
-        query = sync.batch_query(sync.QUERIES["question"], 2)
-        self.assertTrue(query.startswith("query Batch($v0: String!, $v1: String!) {"))
-        self.assertIn("r0: question(titleSlug: $v0) {", query)
-        self.assertIn("r1: question(titleSlug: $v1) {", query)
-        self.assertNotIn("$slug", query)
-        self.assertNotIn("#", query)
-        self.assertEqual(query.count("{"), query.count("}"))
+class ProgressBarTest(unittest.TestCase):
+    def test_rounds_to_nearest_ten_percent(self):
+        self.assertEqual(sync.progress_bar(0, 75), "░░░░░░░░░░")
+        self.assertEqual(sync.progress_bar(24, 75), "███░░░░░░░")    # 32%
+        self.assertEqual(sync.progress_bar(26, 75), "███░░░░░░░")    # 34.7%
+        self.assertEqual(sync.progress_bar(27, 75), "████░░░░░░")    # 36%
+        self.assertEqual(sync.progress_bar(75, 75), "██████████")
+        self.assertEqual(sync.progress_bar(1, 0), "░░░░░░░░░░")
 
-
-class FakeResponse:
-    def __init__(self, status, body=b"", headers=None):
-        self.status, self.body, self.headers = status, body, headers or {}
-
-    def read(self):
-        return self.body
-
-    def getheader(self, name):
-        return self.headers.get(name)
-
-
-class FakeConnection:
-    def __init__(self, responses):
-        self.responses = responses
-
-    def request(self, *args):
-        pass
-
-    def getresponse(self):
-        return self.responses.pop(0)
-
-    def close(self):
-        pass
-
-
-class ThrottleTest(unittest.TestCase):
-    def test_429_honors_retry_after_and_slows_down_then_recovers(self):
-        client = sync.LeetCode("s", "c")
-        ok = FakeResponse(200, b'{"data": {"x": 1}}')
-        client.conn = FakeConnection([FakeResponse(429, headers={"Retry-After": "7"}), ok])
-        sleeps = []
-        with mock.patch.object(sync.time, "sleep", sleeps.append):
-            self.assertEqual(client.query("q"), {"x": 1})
-        self.assertIn(7.0, sleeps)
-        self.assertAlmostEqual(client.delay, sync.MIN_DELAY * 2 * 0.9)
-
-    def test_other_http_errors_raise_immediately(self):
-        client = sync.LeetCode("s", "c")
-        client.conn = FakeConnection([FakeResponse(403)])
-        with self.assertRaises(sync.HttpError):
-            client.query("q")
+    def test_bundled_lists_have_expected_sizes(self):
+        sizes = {name: len(slugs) for name, slugs in sync.load_lists()}
+        self.assertEqual(sizes, {"Blind 75": 75, "NeetCode 150": 150, "Top Interview 150": 150})
 
 
 if __name__ == "__main__":

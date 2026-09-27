@@ -31,6 +31,14 @@ and are loaded into `QUERIES` keyed by filename. When LeetCode changes its API,
 you can paste a file straight into a GraphQL client to debug it, and the git
 diff shows exactly which fields changed.
 
+Problem lists such as Blind 75 and NeetCode 150 live in `lists/*.txt`: the
+first line is `# <name>`, then one LeetCode slug per line, with `#` comments
+ignored. Blind 75 and NeetCode 150 come from NeetCode's own
+[problem data](https://github.com/neetcode-gh/leetcode/blob/main/.problemSiteData.json),
+and every slug was checked against LeetCode. Top Interview 150 comes from
+LeetCode's own study plan, fetched with the public `studyPlanV2Detail` query. Dropping in another `.txt` file
+adds a row to the index; no code changes are needed.
+
 ```
 leetcode-solutions/
   solutions/0001-two-sum/
@@ -38,17 +46,24 @@ leetcode-solutions/
     solution.cpp
     README.md        created once with metadata and a Notes section, never overwritten
   .sync_state.json   last synced timestamp and per-problem metadata
-  README.md          index table between the leetcode-sync markers
+  README.md          index between the leetcode-sync markers: progress by
+                     difficulty, progress on each list, and all solved problems
 ```
 
 `.sync_state.json` does two jobs. Its timestamp makes runs incremental, and its
-per-problem metadata is what the index is built from, so building the index
-needs no API calls.
+per-problem metadata is what the index is built from. It also caches
+LeetCode's problem counts per difficulty (`totals`), refreshed with one request
+on each run that has new submissions. If that request fails, the old counts are
+kept.
+
+Progress bars are plain text in 10% steps (`███░░░░░░░ 32%`), inside inline
+code so they line up. This means no images, and they render the same in
+GitHub's light and dark themes. The exact percentage is printed next to each bar.
 
 ## Decisions
 
 - **One commit per day, backdated.** The message is the day and the problems
-  solved that day, for example `20260101: 0001, 0015, 0146`. Days use local
+  solved that day, for example `2026-01-01: 0001, 0015, 0146`. Days use local
   time, and the author and committer dates are set to the day's last submission
   with the local timezone offset, so each commit lands on the right square of
   the contribution graph.
@@ -94,11 +109,16 @@ needs no API calls.
 
 ## Testing
 
-`test_sync.py` runs the whole sync against a fake client in a temporary git
+`tests/test_sync.py` runs the whole sync against a fake client in a temporary git
 repo. It checks commit order and dates, skipped duplicates, preserved notes and
 README text, and that a second run changes nothing. It also checks one commit per
 day with the right message and date, that a day with only identical
 resubmissions gets no commit, that a same-day rerun amends the unpushed commit,
-and that a pushed day gets a new commit instead. Smaller tests check the batched query text, and use a
-scripted fake connection to check 429 handling (`Retry-After` is honored and the
-delay adapts) and that other HTTP errors fail immediately.
+and that a pushed day gets a new commit instead. `tests/test_client.py` checks the
+batched query text, and uses a scripted fake connection to check 429 handling
+(`Retry-After` is honored and the delay adapts) and that other HTTP errors fail
+immediately. Run both from the repo root:
+
+```bash
+python3 -m unittest discover -s tests -t .
+```
