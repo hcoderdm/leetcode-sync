@@ -1,0 +1,11 @@
+# Public metadata for folder names and the solutions index.
+query Question($slug: String!) {
+  question(titleSlug: $slug) {
+    questionFrontendId
+    title
+    difficulty
+    topicTags {
+      name
+    }
+  }
+}

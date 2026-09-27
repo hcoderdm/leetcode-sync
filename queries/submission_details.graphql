@@ -1,0 +1,8 @@
+# Source for one submission.
+query SubmissionDetails($id: Int!) {
+  submissionDetails(submissionId: $id) {
+    code
+    runtimePercentile
+    memoryPercentile
+  }
+}

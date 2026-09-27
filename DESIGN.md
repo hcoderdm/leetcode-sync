@@ -24,6 +24,11 @@ tool and `.env`. The solutions repo (default `../leetcode-solutions`, or
 `LEETCODE_SOLUTIONS_REPO`, or `--repo`) holds everything sync writes, and the
 script refuses to write into its own folder.
 
+The GraphQL queries live in `queries/*.graphql`, one named operation per file,
+and are loaded into `QUERIES` keyed by filename. When LeetCode changes its API,
+you can paste a file straight into a GraphQL client to debug it, and the git
+diff shows exactly which fields changed.
+
 ```
 leetcode-solutions/
   solutions/0001-two-sum/

@@ -25,7 +25,11 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from errors import ApiError, AuthError, MissingCredentialsError, NotAGitRepoError, SyncError, ToolRepoError
+
 GRAPHQL_URL = "https://leetcode.com/graphql/"
+QUERY_DIR = Path(__file__).resolve().parent / "queries"
+QUERIES = {path.stem: path.read_text() for path in QUERY_DIR.glob("*.graphql")}
 STATE_FILE = ".sync_state.json"
 SOLUTIONS_DIR = "solutions"
 INDEX_START = "<!-- leetcode-sync:start -->"
@@ -44,9 +48,18 @@ EXTENSIONS = {
 DIFFICULTY_ORDER = ["Easy", "Medium", "Hard"]
 
 
-class AuthError(Exception):
-    pass
+def parse_args() -> argparse.Namespace:
+    tool_dir = Path(__file__).resolve().parent
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--repo", type=Path, default=os.environ.get("LEETCODE_SOLUTIONS_REPO", tool_dir.parent / "leetcode-solutions"), help="solutions git repo to write into (default: ../leetcode-solutions)")
+    parser.add_argument("--push", action="store_true", help="git push after committing")
+    parser.add_argument("--dry-run", action="store_true", help="list what would be synced")
+    return parser.parse_args()
 
+
+"""
+Classes.
+"""
 
 class LeetCode:
     """Minimal client for LeetCode's (undocumented) GraphQL API."""
@@ -89,29 +102,20 @@ class LeetCode:
                     continue
                 raise
         if payload.get("data") is None:
-            raise RuntimeError(f"LeetCode API error: {payload.get('errors')}")
+            raise ApiError(errors=payload.get("errors"))
         return payload["data"]
 
     def username(self):
-        status = self.query("query { userStatus { isSignedIn username } }")["userStatus"]
+        status = self.query(QUERIES["user_status"])["userStatus"]
         if not status["isSignedIn"]:
-            raise AuthError(
-                "LeetCode rejected the session cookie. It has probably expired: copy "
-                "fresh LEETCODE_SESSION and csrftoken values from your browser."
-            )
+            raise AuthError()
         return status["username"]
 
     def accepted_submissions(self, since):
         """Accepted submissions newer than `since` (unix seconds), newest first."""
-        query = """query ($offset: Int!, $limit: Int!) {
-          submissionList(offset: $offset, limit: $limit) {
-            hasNext
-            submissions { id lang timestamp statusDisplay runtime memory title titleSlug }
-          }
-        }"""
         found, offset = [], 0
         while True:
-            page = self.query(query, {"offset": offset, "limit": PAGE_SIZE})["submissionList"]
+            page = self.query(QUERIES["submission_list"], {"offset": offset, "limit": PAGE_SIZE})["submissionList"]
             for sub in page["submissions"]:
                 if int(sub["timestamp"]) <= since:
                     return found
@@ -122,22 +126,18 @@ class LeetCode:
             offset += PAGE_SIZE
 
     def submission_code(self, submission_id):
-        query = """query ($id: Int!) {
-          submissionDetails(submissionId: $id) { code runtimePercentile memoryPercentile }
-        }"""
-        return self.query(query, {"id": int(submission_id)})["submissionDetails"]
+        return self.query(QUERIES["submission_details"], {"id": int(submission_id)})["submissionDetails"]
 
     def question(self, slug):
-        query = """query ($slug: String!) {
-          question(titleSlug: $slug) { questionFrontendId title difficulty topicTags { name } }
-        }"""
         try:
-            return self.query(query, {"slug": slug})["question"]
-        except (urllib.error.HTTPError, RuntimeError):
+            return self.query(QUERIES["question"], {"slug": slug})["question"]
+        except (urllib.error.HTTPError, ApiError):
             return None  # metadata is unavailable for premium-locked problems
 
 
-# ---------------------------------------------------------------- repo helpers
+"""
+Helpers.
+"""
 
 def load_env(path):
     if not path.exists():
@@ -245,7 +245,9 @@ def update_readme(repo, state):
     path.write_text(text)
 
 
-# ------------------------------------------------------------------------ sync
+"""
+Primary.
+"""
 
 def sync(repo, client, push=False, dry_run=False, log=print):
     state = load_state(repo)
@@ -317,28 +319,21 @@ def sync(repo, client, push=False, dry_run=False, log=print):
 def main():
     tool_dir = Path(__file__).resolve().parent
     load_env(tool_dir / ".env")
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--repo", type=Path,
-                        default=os.environ.get("LEETCODE_SOLUTIONS_REPO",
-                                               tool_dir.parent / "leetcode-solutions"),
-                        help="solutions git repo to write into (default: ../leetcode-solutions)")
-    parser.add_argument("--push", action="store_true", help="git push after committing")
-    parser.add_argument("--dry-run", action="store_true", help="list what would be synced")
-    args = parser.parse_args()
+    args = parse_args()
 
-    repo = Path(args.repo).expanduser().resolve()
-    if repo == tool_dir:
-        sys.exit("Refusing to write solutions into the leetcode-sync tool repo; pass --repo.")
-    if not (repo / ".git").exists():
-        sys.exit(f"{repo} is not a git repo. Create it first: git init {repo}")
-    session = os.environ.get("LEETCODE_SESSION")
-    csrf = os.environ.get("LEETCODE_CSRF_TOKEN")
-    if not session or not csrf:
-        sys.exit("Set LEETCODE_SESSION and LEETCODE_CSRF_TOKEN (see README.md).")
-    print(f"Syncing into {repo}")
     try:
+        repo = Path(args.repo).expanduser().resolve()
+        if repo == tool_dir:
+            raise ToolRepoError()
+        if not (repo / ".git").exists():
+            raise NotAGitRepoError(repo=repo)
+        session = os.environ.get("LEETCODE_SESSION")
+        csrf = os.environ.get("LEETCODE_CSRF_TOKEN")
+        if not session or not csrf:
+            raise MissingCredentialsError()
+        print(f"Syncing into {repo}")
         sync(repo, LeetCode(session, csrf), push=args.push, dry_run=args.dry_run)
-    except AuthError as e:
+    except SyncError as e:
         sys.exit(str(e))
 
 

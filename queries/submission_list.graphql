@@ -1,0 +1,16 @@
+# Paginated history for the signed-in user, newest first.
+query SubmissionList($offset: Int!, $limit: Int!) {
+  submissionList(offset: $offset, limit: $limit) {
+    hasNext
+    submissions {
+      id
+      lang
+      timestamp
+      statusDisplay
+      runtime
+      memory
+      title
+      titleSlug
+    }
+  }
+}
