@@ -1,0 +1,1 @@
+# Python >= 3.9 (tested on 3.9.6, 3.12, 3.13, 3.14), standard library only, nothing to install

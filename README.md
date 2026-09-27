@@ -2,50 +2,41 @@
 
 My accepted LeetCode solutions, synced automatically by [`sync.py`](sync.py).
 Each commit is one accepted submission, dated to when I submitted it, so `git log`
-on any solution file shows every attempt in order.
+on any solution file shows every attempt in order. See [DESIGN.md](DESIGN.md) for how it works.
 
 <!-- leetcode-sync:start -->
 <!-- leetcode-sync:end -->
 
-## How the sync works
+## Usage
 
-`sync.py` (Python 3, standard library only) asks LeetCode's GraphQL API for any
-accepted submissions made since the last run, then processes them oldest first:
-
-- writes the code to `solutions/<number>-<slug>/solution.<ext>`, with one file per language
-- creates a `README.md` for the problem (difficulty, topics, link, and a Notes
-  section) the first time you solve it. Sync never overwrites this file, so notes are safe.
-- commits with `GIT_AUTHOR_DATE` set to the submission time, which puts backfilled
-  history on the correct days of your GitHub contribution graph
-- skips resubmissions whose code is identical to the current file
-- regenerates the index table above (only the text between the markers changes)
-
-Progress is stored in `.sync_state.json`, so each run fetches only new submissions.
-
-### Setup
+Requires Python 3.9 or newer and nothing else. The macOS system `python3` works.
 
 1. Log in to leetcode.com. In DevTools, go to Application → Cookies and copy
    `LEETCODE_SESSION` and `csrftoken`.
-2. Put them in `.env` in this folder (the file is gitignored):
-   ```
-   LEETCODE_SESSION=...
-   LEETCODE_CSRF_TOKEN=...
-   ```
-3. Preview the sync first, then run it for real:
+2. Run `cp .env.example .env` and fill in both values (`.env` is gitignored).
+3. Preview what would sync, then run it:
    ```bash
    python3 sync.py --dry-run
    python3 sync.py --push
    ```
 
-The session cookie expires every few weeks. When it does, the script exits with a
-message telling you to paste in fresh values.
+| Flag | Effect |
+|---|---|
+| `--dry-run` | List the submissions that would be committed, without writing anything |
+| `--push` | Run `git push` after committing |
+| `--repo PATH` | Write into a different git repo (default: this folder) |
 
-For the backfilled commits to count on your contribution graph, your git
-`user.email` must be an email address attached to your GitHub account.
+When the session cookie expires, which happens every few weeks, the script exits
+with a message telling you to paste in fresh values.
 
-### Running it on a schedule (macOS)
+For backfilled commits to show up on your GitHub contribution graph, your git
+`user.email` must be attached to your GitHub account.
 
-Save the following as `~/Library/LaunchAgents/com.leetcode-sync.plist`, adjusting the paths:
+Add notes to any problem's `solutions/<problem>/README.md`. Sync never overwrites those files.
+
+### Run daily (macOS)
+
+Save the following as `~/Library/LaunchAgents/com.leetcode-sync.plist`, adjusting the path:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -67,9 +58,6 @@ Then load it:
 ```bash
 launchctl load ~/Library/LaunchAgents/com.leetcode-sync.plist
 ```
-
-The job runs on your own machine rather than in GitHub Actions. That keeps your
-LeetCode cookie off GitHub and avoids LeetCode blocking cloud IP addresses.
 
 ### Tests
 
