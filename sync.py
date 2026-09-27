@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Sync accepted LeetCode submissions into this git repo.
+"""
+Sync accepted LeetCode submissions into this git repo.
 
 Each accepted submission becomes its own commit, dated to when you submitted it.
-The solution file always holds your latest attempt; `git log` holds every attempt,
+The solution file always holds your latest attempt, and `git log` holds every attempt,
 and GitHub's contribution graph reflects the days you actually solved things.
 
 Auth: set LEETCODE_SESSION and LEETCODE_CSRF_TOKEN (env vars or a .env file next
@@ -26,7 +27,7 @@ STATE_FILE = ".sync_state.json"
 SOLUTIONS_DIR = "solutions"
 INDEX_START = "<!-- leetcode-sync:start -->"
 INDEX_END = "<!-- leetcode-sync:end -->"
-REQUEST_DELAY = 1.0  # seconds between requests; LeetCode rate-limits aggressively
+REQUEST_DELAY = 1.0  # LeetCode rate-limits aggressively, so space out requests
 PAGE_SIZE = 20
 
 EXTENSIONS = {
@@ -57,7 +58,7 @@ class LeetCode:
             "User-Agent": "Mozilla/5.0 (leetcode-sync)",
         }
         self._last_request = 0.0
-        # python.org's macOS build ships without CA certs; fall back to the system bundle.
+        # python.org's macOS build ships without CA certs, so fall back to the system bundle.
         self.ssl_context = ssl.create_default_context()
         if not self.ssl_context.get_ca_certs() and Path("/etc/ssl/cert.pem").exists():
             self.ssl_context.load_verify_locations("/etc/ssl/cert.pem")
