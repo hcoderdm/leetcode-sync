@@ -1,9 +1,9 @@
 # leetcode-sync
 
 Syncs my accepted LeetCode submissions into a separate
-[leetcode-solutions](../leetcode-solutions) repo. Each commit there is one accepted
-submission, dated to when I submitted it, so `git log` on any solution file shows
-every attempt in order. See [DESIGN.md](DESIGN.md) for how it works.
+[leetcode-solutions](../leetcode-solutions) repo, with one commit per day I solved
+something, dated to that day, for example `20260101: 0001, 0015, 0146`. See
+[DESIGN.md](DESIGN.md) for how it works.
 
 ## Usage
 
@@ -16,13 +16,13 @@ Requires Python 3.9 or newer and nothing else. The macOS system `python3` works.
    (`git init ../leetcode-solutions`); set `LEETCODE_SOLUTIONS_REPO` in `.env` to use another path.
 3. Preview what would sync, then run it:
    ```bash
-   python3 sync.py --dry-run
+   python3 sync.py --test
    python3 sync.py --push
    ```
 
 | Flag | Effect |
 |---|---|
-| `--dry-run` | List the submissions that would be committed, without writing anything |
+| `--test` | List the submissions that would be committed, without writing anything |
 | `--push` | Run `git push` after committing |
 | `--repo PATH` | Solutions repo to write into (default: `LEETCODE_SOLUTIONS_REPO`, else `../leetcode-solutions`) |
 

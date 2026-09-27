@@ -14,28 +14,34 @@ Target repo: --repo, else LEETCODE_SOLUTIONS_REPO, else ../leetcode-solutions
 """
 
 import argparse
+import http.client
 import json
 import os
+import re
+import socket
 import ssl
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from errors import ApiError, AuthError, MissingCredentialsError, NotAGitRepoError, SyncError, ToolRepoError
+from errors import ApiError, AuthError, HttpError, MissingCredentialsError, NotAGitRepoError, SyncError, ToolRepoError
 
-GRAPHQL_URL = "https://leetcode.com/graphql/"
+GRAPHQL_HOST = "leetcode.com"
+GRAPHQL_PATH = "/graphql/"
 QUERY_DIR = Path(__file__).resolve().parent / "queries"
 QUERIES = {path.stem: path.read_text() for path in QUERY_DIR.glob("*.graphql")}
 STATE_FILE = ".sync_state.json"
 SOLUTIONS_DIR = "solutions"
 INDEX_START = "<!-- leetcode-sync:start -->"
 INDEX_END = "<!-- leetcode-sync:end -->"
-REQUEST_DELAY = 1.0  # LeetCode rate-limits aggressively, so requests are spaced out
+MIN_DELAY = 0.25  # seconds between requests; doubles on each 429, decays back on success
+MAX_DELAY = 8.0
+CONNECT_TIMEOUT = 3  # per address, so an unroutable IPv6 address fails fast
+READ_TIMEOUT = 30
 PAGE_SIZE = 20
+BATCH_SIZE = 20  # lookups aliased into one GraphQL request
 
 EXTENSIONS = {
     "python": "py", "python3": "py", "pythondata": "py", "cpp": "cpp", "c": "c",
@@ -53,13 +59,57 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--repo", type=Path, default=os.environ.get("LEETCODE_SOLUTIONS_REPO", tool_dir.parent / "leetcode-solutions"), help="solutions git repo to write into (default: ../leetcode-solutions)")
     parser.add_argument("--push", action="store_true", help="git push after committing")
-    parser.add_argument("--dry-run", action="store_true", help="list what would be synced")
+    parser.add_argument("--test", action="store_true", help="list what would be synced")
     return parser.parse_args()
 
 
 """
 Classes.
 """
+
+class Connection(http.client.HTTPSConnection):
+    """Keep-alive HTTPS connection that tries IPv4 addresses first.
+
+    Some networks advertise IPv6 but can't route it. urllib would wait out the full
+    timeout on each IPv6 address, on every request, before falling back to IPv4.
+    """
+
+    def connect(self):
+        infos = socket.getaddrinfo(self.host, self.port, type=socket.SOCK_STREAM)
+        infos.sort(key=lambda info: info[0] != socket.AF_INET)
+        error = None
+        for family, type_, proto, _, address in infos:
+            sock = socket.socket(family, type_, proto)
+            sock.settimeout(CONNECT_TIMEOUT)
+            try:
+                sock.connect(address)
+            except OSError as e:
+                sock.close()
+                error = e
+                continue
+            sock.settimeout(self.timeout)
+            self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+            return
+        raise error or OSError(f"Could not connect to {self.host}")
+
+
+def batch_query(template, count):
+    """Repeat a one-variable query `count` times under aliases r0, r1, ... in one request."""
+    source = "\n".join(line for line in template.splitlines() if not line.lstrip().startswith("#"))
+    header, _, body = source.partition("{")
+    body = body.rsplit("}", 1)[0].strip()
+    name, type_ = re.search(r"\$(\w+)\s*:\s*([\w!\[\]]+)", header).groups()
+    params = ", ".join(f"$v{i}: {type_}" for i in range(count))
+    fields = "\n".join(f"r{i}: " + re.sub(rf"\${name}\b", f"$v{i}", body) for i in range(count))
+    return f"query Batch({params}) {{\n{fields}\n}}"
+
+
+def retry_after(response):
+    try:
+        return min(float(response.getheader("Retry-After")), 60.0)
+    except (TypeError, ValueError):
+        return None
+
 
 class LeetCode:
     """Minimal client for LeetCode's (undocumented) GraphQL API."""
@@ -73,37 +123,69 @@ class LeetCode:
             "X-CSRFToken": csrf_token,
             "User-Agent": "Mozilla/5.0 (leetcode-sync)",
         }
-        self._last_request = 0.0
         # python.org's macOS build ships without CA certs, so the fallback is the system bundle.
-        self.ssl_context = ssl.create_default_context()
-        if not self.ssl_context.get_ca_certs() and Path("/etc/ssl/cert.pem").exists():
-            self.ssl_context.load_verify_locations("/etc/ssl/cert.pem")
+        ssl_context = ssl.create_default_context()
+        if not ssl_context.get_ca_certs() and Path("/etc/ssl/cert.pem").exists():
+            ssl_context.load_verify_locations("/etc/ssl/cert.pem")
+        self.conn = Connection(GRAPHQL_HOST, timeout=READ_TIMEOUT, context=ssl_context)
+        self.delay = MIN_DELAY
+        self._last_request = 0.0
 
-    def query(self, query, variables=None, retries=4):
-        body = json.dumps({"query": query, "variables": variables or {}}).encode()
+    def query(self, query, variables=None, retries=5):
+        body = json.dumps({"query": query, "variables": variables or {}})
         for attempt in range(retries + 1):
-            wait = REQUEST_DELAY - (time.monotonic() - self._last_request)
+            wait = self.delay - (time.monotonic() - self._last_request)
             if wait > 0:
                 time.sleep(wait)
             self._last_request = time.monotonic()
-            req = urllib.request.Request(GRAPHQL_URL, data=body, headers=self.headers)
             try:
-                with urllib.request.urlopen(req, timeout=30, context=self.ssl_context) as resp:
-                    payload = json.load(resp)
-                break
-            except urllib.error.HTTPError as e:
-                if e.code in (429, 500, 502, 503, 504) and attempt < retries:
-                    time.sleep(3 ** attempt)
-                    continue
+                self.conn.request("POST", GRAPHQL_PATH, body, self.headers)
+                response = self.conn.getresponse()
+                raw = response.read()
+            except ssl.SSLCertVerificationError:
                 raise
-            except urllib.error.URLError:
-                if attempt < retries:
-                    time.sleep(3 ** attempt)
-                    continue
-                raise
-        if payload.get("data") is None:
-            raise ApiError(errors=payload.get("errors"))
-        return payload["data"]
+            except (OSError, http.client.HTTPException):
+                self.conn.close()  # stale keep-alive or a network blip, so reconnect
+                if attempt == retries:
+                    raise
+                time.sleep(2 ** attempt)
+                continue
+            if response.status == 429 or response.status >= 500:
+                if response.status == 429:
+                    self.delay = min(self.delay * 2, MAX_DELAY)
+                if attempt == retries:
+                    raise HttpError(status=response.status)
+                time.sleep(retry_after(response) or 2 ** attempt)
+                continue
+            if response.status != 200:
+                raise HttpError(status=response.status)
+            self.delay = max(MIN_DELAY, self.delay * 0.9)
+            payload = json.loads(raw)
+            if payload.get("data") is None:
+                raise ApiError(errors=payload.get("errors"))
+            return payload["data"]
+
+    def batched(self, name, values):
+        """Run one-variable query `name` for each value, BATCH_SIZE per request.
+
+        Returns {value: result}; a result is None if that lookup failed. If LeetCode
+        rejects a whole batch, falls back to one request per value.
+        """
+        results = {}
+        for start in range(0, len(values), BATCH_SIZE):
+            chunk = values[start:start + BATCH_SIZE]
+            try:
+                data = self.query(batch_query(QUERIES[name], len(chunk)),
+                                  {f"v{i}": value for i, value in enumerate(chunk)})
+                results.update({value: data.get(f"r{i}") for i, value in enumerate(chunk)})
+            except (ApiError, HttpError):
+                for value in chunk:
+                    try:
+                        data = self.query(batch_query(QUERIES[name], 1), {"v0": value})
+                        results[value] = data.get("r0")
+                    except (ApiError, HttpError):
+                        results[value] = None
+        return results
 
     def username(self):
         status = self.query(QUERIES["user_status"])["userStatus"]
@@ -125,14 +207,17 @@ class LeetCode:
                 return found
             offset += PAGE_SIZE
 
-    def submission_code(self, submission_id):
-        return self.query(QUERIES["submission_details"], {"id": int(submission_id)})["submissionDetails"]
+    def submission_codes(self, submission_ids):
+        """{submission id: code}. Raises if any submission's code can't be fetched."""
+        details = self.batched("submission_details", [int(i) for i in submission_ids])
+        missing = [i for i, d in details.items() if not d]
+        if missing:
+            raise ApiError(errors=f"no code returned for submission(s) {missing}")
+        return {str(i): d["code"] for i, d in details.items()}
 
-    def question(self, slug):
-        try:
-            return self.query(QUERIES["question"], {"slug": slug})["question"]
-        except (urllib.error.HTTPError, ApiError):
-            return None  # metadata is unavailable for premium-locked problems
+    def questions(self, slugs):
+        """{slug: metadata}; metadata is None when unavailable (e.g. Premium-locked problems)."""
+        return self.batched("question", list(slugs))
 
 
 """
@@ -167,26 +252,53 @@ def git(repo, *args, env=None):
     ).stdout
 
 
-def commit(repo, message, paths, timestamp=None):
+def commit(repo, message, paths, timestamp=None, amend=False):
     git(repo, "add", "--", *paths)
-    if not git(repo, "diff", "--cached", "--name-only", "--", *paths).strip():
+    if not amend and not git(repo, "diff", "--cached", "--name-only", "--", *paths).strip():
         return False
-    env = None
+    options, env = ["-q", "-m", message], None
+    if amend:
+        options.append("--amend")
     if timestamp is not None:
-        date = f"{int(timestamp)} +0000"
-        env = {"GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date}
-    git(repo, "commit", "-q", "-m", message, "--", *paths, env=env)
+        # --date because --amend would otherwise keep the original author date.
+        date = f"{int(timestamp)} {local_time(timestamp).strftime('%z')}"
+        options.append(f"--date={date}")
+        env = {"GIT_COMMITTER_DATE": date}
+    git(repo, "commit", *options, "--", *paths, env=env)
     return True
 
 
+def unpushed_head_message(repo):
+    """HEAD's subject line, or None if there are no commits or HEAD is already pushed."""
+    try:
+        subject = git(repo, "log", "-1", "--format=%s").strip()
+    except subprocess.CalledProcessError:
+        return None
+    if git(repo, "branch", "-r", "--contains", "HEAD").strip():
+        return None
+    return subject
+
+
+def local_time(timestamp):
+    return datetime.fromtimestamp(int(timestamp), timezone.utc).astimezone()
+
+
 def fmt_date(timestamp):
-    return datetime.fromtimestamp(int(timestamp), timezone.utc).strftime("%Y-%m-%d")
+    return local_time(timestamp).strftime("%Y-%m-%d")
+
+
+def day_key(timestamp):
+    """Local calendar day, e.g. 20260101. Days are local so commits land on the right graph square."""
+    return local_time(timestamp).strftime("%Y%m%d")
+
+
+def problem_label(problem):
+    number = problem["number"]
+    return number.zfill(4) if number.isdigit() else number.replace(" ", "-")
 
 
 def folder_name(problem):
-    number = problem["number"]
-    prefix = number.zfill(4) if number.isdigit() else number.replace(" ", "-")
-    return f"{prefix}-{problem['slug']}"
+    return f"{problem_label(problem)}-{problem['slug']}"
 
 
 def problem_readme(problem):
@@ -249,66 +361,88 @@ def update_readme(repo, state):
 Primary.
 """
 
-def sync(repo, client, push=False, dry_run=False, log=print):
+def sync(repo, client, push=False, test=False, log=print):
     state = load_state(repo)
     log(f"Signed in as {client.username()}")
     subs = client.accepted_submissions(since=state["last_timestamp"])
     subs.sort(key=lambda s: int(s["timestamp"]))
     log(f"{len(subs)} new accepted submission(s)")
 
-    committed = 0
+    # Fetch metadata and code up front, in batches, instead of one request per submission.
+    new_slugs = sorted({sub["titleSlug"] for sub in subs} - state["problems"].keys())
+    questions = client.questions(new_slugs) if new_slugs else {}
+    codes = client.submission_codes([sub["id"] for sub in subs]) if subs and not test else {}
+
+    days = {}  # day key -> that day's submissions, oldest first
     for sub in subs:
-        slug, lang, ts = sub["titleSlug"], sub["lang"], int(sub["timestamp"])
-        problem = state["problems"].get(slug)
-        if problem is None:
-            q = client.question(slug) or {}
-            problem = {
-                "slug": slug,
-                "number": str(q.get("questionFrontendId") or "0"),
-                "title": q.get("title") or sub["title"],
-                "difficulty": q.get("difficulty") or "Unknown",
-                "tags": [t["name"] for t in q.get("topicTags") or []],
-                "first_solved": ts,
-                "last_solved": ts,
-                "languages": {},
-            }
-        folder = Path(SOLUTIONS_DIR) / folder_name(problem)
-        solution = folder / f"solution.{EXTENSIONS.get(lang, 'txt')}"
-        verb = "Update" if lang in problem["languages"] else "Solve"
-        message = (
-            f"{verb} {problem['number']}. {problem['title']} ({problem['difficulty']}) "
-            f"· {lang} · {sub['runtime']}, {sub['memory']}"
-        )
-        if dry_run:
-            log(f"[dry-run] {fmt_date(ts)} {message}")
+        days.setdefault(day_key(sub["timestamp"]), []).append(sub)
+
+    # One commit per day: "20260101: 0001, 0015, 0146", holding that day's solutions,
+    # the regenerated index, and the state file.
+    committed = 0
+    for day, day_subs in days.items():
+        labels, folders = set(), set()
+        for sub in day_subs:
+            slug, lang, ts = sub["titleSlug"], sub["lang"], int(sub["timestamp"])
+            problem = state["problems"].get(slug)
+            if problem is None:
+                q = questions.get(slug) or {}
+                problem = {
+                    "slug": slug,
+                    "number": str(q.get("questionFrontendId") or "0"),
+                    "title": q.get("title") or sub["title"],
+                    "difficulty": q.get("difficulty") or "Unknown",
+                    "tags": [t["name"] for t in q.get("topicTags") or []],
+                    "first_solved": ts,
+                    "last_solved": ts,
+                    "languages": {},
+                }
+            if test:
+                labels.add(problem_label(problem))
+                continue
+
+            folder = Path(SOLUTIONS_DIR) / folder_name(problem)
+            solution = folder / f"solution.{EXTENSIONS.get(lang, 'txt')}"
+            code = codes[sub["id"]]
+            code = code if code.endswith("\n") else code + "\n"
+            state["last_timestamp"] = ts
+            if (repo / solution).exists() and (repo / solution).read_text() == code:
+                log(f"  skipped (identical code): {problem['title']} · {lang}")
+                continue
+            (repo / folder).mkdir(parents=True, exist_ok=True)
+            (repo / solution).write_text(code)
+            readme = repo / folder / "README.md"
+            if not readme.exists():
+                readme.write_text(problem_readme(problem))
+
+            problem["languages"][lang] = sub["id"]
+            problem["last_solved"] = ts
+            state["problems"][slug] = problem
+            labels.add(problem_label(problem))
+            folders.add(str(folder))
+
+        if not labels:
+            continue
+        if test:
+            log(f"[test] {day}: {', '.join(sorted(labels))}")
             continue
 
-        code = client.submission_code(sub["id"])["code"]
-        code = code if code.endswith("\n") else code + "\n"
-        state["last_timestamp"] = ts
-        if (repo / solution).exists() and (repo / solution).read_text() == code:
-            log(f"{fmt_date(ts)} skipped (identical code): {problem['title']} · {lang}")
-            continue
-        (repo / folder).mkdir(parents=True, exist_ok=True)
-        (repo / solution).write_text(code)
-        readme = repo / folder / "README.md"
-        if not readme.exists():
-            readme.write_text(problem_readme(problem))
-
-        problem["languages"][lang] = sub["id"]
-        problem["last_solved"] = ts
-        state["problems"][slug] = problem
+        # A later run on the same day folds into that day's commit, unless it was already pushed.
+        head = unpushed_head_message(repo)
+        amend = head is not None and head.startswith(f"{day}: ")
+        if amend:
+            labels |= set(head.split(": ", 1)[1].split(", "))
+        message = f"{day}: {', '.join(sorted(labels))}"
+        update_readme(repo, state)
         save_state(repo, state)
-        commit(repo, message, [str(folder), STATE_FILE], timestamp=ts)
+        commit(repo, message, [*sorted(folders), "README.md", STATE_FILE],
+               timestamp=day_subs[-1]["timestamp"], amend=amend)
         committed += 1
-        log(f"{fmt_date(ts)} {message}")
+        log(message + (" (amended)" if amend else ""))
 
-    if dry_run:
+    if test:
         return 0
-    update_readme(repo, state)
-    save_state(repo, state)
-    if commit(repo, "Update solutions index", ["README.md", STATE_FILE]):
-        committed += 1
+    save_state(repo, state)  # skipped resubmissions advance the timestamp; committed with the next day
     log(f"Made {committed} commit(s)")
     if push and committed:
         git(repo, "push")
@@ -322,20 +456,28 @@ def main():
     args = parse_args()
 
     try:
+        # Validate solutions repo path.
         repo = Path(args.repo).expanduser().resolve()
         if repo == tool_dir:
             raise ToolRepoError()
+        
+        # Validate solutions repo is a git repo.
         if not (repo / ".git").exists():
             raise NotAGitRepoError(repo=repo)
+        
+        # Validate LeetCode session and CSRF token.
         session = os.environ.get("LEETCODE_SESSION")
         csrf = os.environ.get("LEETCODE_CSRF_TOKEN")
         if not session or not csrf:
             raise MissingCredentialsError()
+        
+        # Sync solutions.
         print(f"Syncing into {repo}")
-        sync(repo, LeetCode(session, csrf), push=args.push, dry_run=args.dry_run)
+        sync(repo, LeetCode(session, csrf), push=args.push, test=args.test)
+    
+    # Handle errors and exit.
     except SyncError as e:
         sys.exit(str(e))
-
 
 if __name__ == "__main__":
     main()

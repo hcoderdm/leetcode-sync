@@ -15,6 +15,12 @@ class ApiError(SyncError):
         super().__init__("LeetCode API error: {errors}".format(**kwargs))
 
 
+class HttpError(SyncError):
+    def __init__(self, **kwargs):
+        self.status = kwargs["status"]
+        super().__init__("LeetCode returned HTTP {status}.".format(**kwargs))
+
+
 class ToolRepoError(SyncError):
     def __init__(self, **kwargs):
         super().__init__("Refusing to write solutions into the leetcode-sync tool repo; pass --repo.".format(**kwargs))
