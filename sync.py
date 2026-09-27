@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-Sync accepted LeetCode submissions into this git repo.
+Sync accepted LeetCode submissions into a separate solutions git repo.
 
-Each accepted submission becomes its own commit, dated to when you submitted it.
-The solution file always holds your latest attempt, and `git log` holds every attempt,
-and GitHub's contribution graph reflects the days you actually solved things.
+Each accepted submission becomes its own commit, dated to when it was submitted.
+The solution file always holds the latest attempt, and `git log` holds every attempt,
+and GitHub's contribution graph reflects the days problems were actually solved.
 
 Auth: set LEETCODE_SESSION and LEETCODE_CSRF_TOKEN (env vars or a .env file next
-to this script). Both come from your browser's leetcode.com cookies.
+to this script). Both come from the browser's leetcode.com cookies.
+
+Target repo: --repo, else LEETCODE_SOLUTIONS_REPO, else ../leetcode-solutions
+(a sibling of this tool's folder).
 """
 
 import argparse
@@ -27,7 +30,7 @@ STATE_FILE = ".sync_state.json"
 SOLUTIONS_DIR = "solutions"
 INDEX_START = "<!-- leetcode-sync:start -->"
 INDEX_END = "<!-- leetcode-sync:end -->"
-REQUEST_DELAY = 1.0  # LeetCode rate-limits aggressively, so space out requests
+REQUEST_DELAY = 1.0  # LeetCode rate-limits aggressively, so requests are spaced out
 PAGE_SIZE = 20
 
 EXTENSIONS = {
@@ -58,7 +61,7 @@ class LeetCode:
             "User-Agent": "Mozilla/5.0 (leetcode-sync)",
         }
         self._last_request = 0.0
-        # python.org's macOS build ships without CA certs, so fall back to the system bundle.
+        # python.org's macOS build ships without CA certs, so the fallback is the system bundle.
         self.ssl_context = ssl.create_default_context()
         if not self.ssl_context.get_ca_certs() and Path("/etc/ssl/cert.pem").exists():
             self.ssl_context.load_verify_locations("/etc/ssl/cert.pem")
@@ -131,7 +134,7 @@ class LeetCode:
         try:
             return self.query(query, {"slug": slug})["question"]
         except (urllib.error.HTTPError, RuntimeError):
-            return None  # e.g. premium-locked problem
+            return None  # metadata is unavailable for premium-locked problems
 
 
 # ---------------------------------------------------------------- repo helpers
@@ -193,7 +196,7 @@ def problem_readme(problem):
         f"**Difficulty:** {problem['difficulty']} · **Topics:** {tags}  \n"
         f"[View on LeetCode](https://leetcode.com/problems/{problem['slug']}/)\n\n"
         "## Notes\n\n"
-        "<!-- Approach, complexity, gotchas. Sync never overwrites this file. -->\n"
+        "<!-- Approach, complexity, gotchas. This file is never overwritten. -->\n"
     )
 
 
@@ -227,7 +230,12 @@ def render_index(state):
 
 def update_readme(repo, state):
     path = repo / "README.md"
-    text = path.read_text() if path.exists() else "# LeetCode Solutions\n\n"
+    text = path.read_text() if path.exists() else (
+        "# LeetCode Solutions\n\n"
+        "My accepted LeetCode solutions, synced automatically by leetcode-sync. Each commit\n"
+        "is one accepted submission, dated to when it was submitted, so `git log` on any\n"
+        "solution file shows every attempt in order. Notes live in each problem's README.\n\n"
+    )
     index = render_index(state)
     if INDEX_START in text and INDEX_END in text:
         head, rest = text.split(INDEX_START, 1)
@@ -307,20 +315,29 @@ def sync(repo, client, push=False, dry_run=False, log=print):
 
 
 def main():
+    tool_dir = Path(__file__).resolve().parent
+    load_env(tool_dir / ".env")
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parent,
-                        help="git repo to write solutions into (default: this script's folder)")
+    parser.add_argument("--repo", type=Path,
+                        default=os.environ.get("LEETCODE_SOLUTIONS_REPO",
+                                               tool_dir.parent / "leetcode-solutions"),
+                        help="solutions git repo to write into (default: ../leetcode-solutions)")
     parser.add_argument("--push", action="store_true", help="git push after committing")
     parser.add_argument("--dry-run", action="store_true", help="list what would be synced")
     args = parser.parse_args()
 
-    load_env(args.repo / ".env")
+    repo = Path(args.repo).expanduser().resolve()
+    if repo == tool_dir:
+        sys.exit("Refusing to write solutions into the leetcode-sync tool repo; pass --repo.")
+    if not (repo / ".git").exists():
+        sys.exit(f"{repo} is not a git repo. Create it first: git init {repo}")
     session = os.environ.get("LEETCODE_SESSION")
     csrf = os.environ.get("LEETCODE_CSRF_TOKEN")
     if not session or not csrf:
         sys.exit("Set LEETCODE_SESSION and LEETCODE_CSRF_TOKEN (see README.md).")
+    print(f"Syncing into {repo}")
     try:
-        sync(args.repo, LeetCode(session, csrf), push=args.push, dry_run=args.dry_run)
+        sync(repo, LeetCode(session, csrf), push=args.push, dry_run=args.dry_run)
     except AuthError as e:
         sys.exit(str(e))
 

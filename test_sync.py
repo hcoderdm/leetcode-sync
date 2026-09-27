@@ -1,4 +1,4 @@
-"""Offline end-to-end test: runs sync() against a fake LeetCode client in a temp repo."""
+"""Offline end-to-end test: sync() against a fake LeetCode client in a temp repo."""
 
 import subprocess
 import tempfile
@@ -58,7 +58,7 @@ class SyncTest(unittest.TestCase):
 
     def test_backfill_then_incremental(self):
         client = FakeLeetCode(
-            [sub(4, "two-sum", 1_700_300_000),              # same code as #1 -> skipped
+            [sub(4, "two-sum", 1_700_300_000),              # same code as #1: skipped
              sub(3, "lru-cache", 1_700_200_000),
              sub(9, "lru-cache", 1_700_150_000, status="Wrong Answer"),
              sub(2, "two-sum", 1_700_100_000, lang="cpp"),

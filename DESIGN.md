@@ -19,13 +19,19 @@ All of these calls go to LeetCode's undocumented GraphQL endpoint at
 
 ## Layout
 
+The tool and the solutions live in separate repos. This repo holds only the
+tool and `.env`. The solutions repo (default `../leetcode-solutions`, or
+`LEETCODE_SOLUTIONS_REPO`, or `--repo`) holds everything sync writes, and the
+script refuses to write into its own folder.
+
 ```
-solutions/0001-two-sum/
-  solution.py      latest accepted code, one file per language
-  solution.cpp
-  README.md        created once with metadata and a Notes section, never overwritten
-.sync_state.json   last synced timestamp and per-problem metadata
-README.md          index table between the leetcode-sync markers
+leetcode-solutions/
+  solutions/0001-two-sum/
+    solution.py      latest accepted code, one file per language
+    solution.cpp
+    README.md        created once with metadata and a Notes section, never overwritten
+  .sync_state.json   last synced timestamp and per-problem metadata
+  README.md          index table between the leetcode-sync markers
 ```
 
 `.sync_state.json` does two jobs. Its timestamp makes runs incremental, and its

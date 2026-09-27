@@ -1,11 +1,9 @@
-# LeetCode Solutions
+# leetcode-sync
 
-My accepted LeetCode solutions, synced automatically by [`sync.py`](sync.py).
-Each commit is one accepted submission, dated to when I submitted it, so `git log`
-on any solution file shows every attempt in order. See [DESIGN.md](DESIGN.md) for how it works.
-
-<!-- leetcode-sync:start -->
-<!-- leetcode-sync:end -->
+Syncs my accepted LeetCode submissions into a separate
+[leetcode-solutions](../leetcode-solutions) repo. Each commit there is one accepted
+submission, dated to when I submitted it, so `git log` on any solution file shows
+every attempt in order. See [DESIGN.md](DESIGN.md) for how it works.
 
 ## Usage
 
@@ -14,6 +12,8 @@ Requires Python 3.9 or newer and nothing else. The macOS system `python3` works.
 1. Log in to leetcode.com. In DevTools, go to Application → Cookies and copy
    `LEETCODE_SESSION` and `csrftoken`.
 2. Run `cp .env.example .env` and fill in both values (`.env` is gitignored).
+   By default solutions go to `../leetcode-solutions`. It must already be a git repo
+   (`git init ../leetcode-solutions`); set `LEETCODE_SOLUTIONS_REPO` in `.env` to use another path.
 3. Preview what would sync, then run it:
    ```bash
    python3 sync.py --dry-run
@@ -24,7 +24,7 @@ Requires Python 3.9 or newer and nothing else. The macOS system `python3` works.
 |---|---|
 | `--dry-run` | List the submissions that would be committed, without writing anything |
 | `--push` | Run `git push` after committing |
-| `--repo PATH` | Write into a different git repo (default: this folder) |
+| `--repo PATH` | Solutions repo to write into (default: `LEETCODE_SOLUTIONS_REPO`, else `../leetcode-solutions`) |
 
 When the session cookie expires, which happens every few weeks, the script exits
 with a message telling you to paste in fresh values.
@@ -32,7 +32,7 @@ with a message telling you to paste in fresh values.
 For backfilled commits to show up on your GitHub contribution graph, your git
 `user.email` must be attached to your GitHub account.
 
-Add notes to any problem's `solutions/<problem>/README.md`. Sync never overwrites those files.
+Add notes to any problem's `solutions/<problem>/README.md` in the solutions repo. Sync never overwrites those files.
 
 ### Run daily (macOS)
 
